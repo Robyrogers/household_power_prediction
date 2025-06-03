@@ -1,0 +1,554 @@
+---
+title: "multivariate_analysis"
+author: "Md Ryad Ahmed Biplob"
+date: "2025-04-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(slider)
+library(zoo)
+library(plotly)
+library(car)
+library(tidymodels)
+library(factoextra)
+
+set.seed(1024)
+```
+
+```{r}
+file_list <- list.files(path = '/Users/biplobmac/Code/Case Studies/Project-I/data', full.names = TRUE)
+
+read_one_file <- function(path) {
+  filename <- basename(path) %>% stringr::str_remove("\\.csv$")
+  
+  read_csv(path,
+    col_types = cols(
+      index = col_datetime("%Y-%m-%d %H:%M:%S"),
+      PUMPE_TOT = col_double(),
+      HAUSHALT_TOT = col_double(),
+      `TEMPERATURE:TOTAL` = col_double()
+    )
+  ) |>
+    mutate(
+      timestamp = index,
+      power = HAUSHALT_TOT,
+      household_id = filename,
+      .keep = "none"
+    )
+}
+
+all_df <- map(file_list, read_one_file)
+```
+
+```{r}
+time_index <- tibble(
+  timestamp = seq(as_datetime("2019-01-01 00:00:00"), as_datetime("2019-12-31 23:45:00"), by='15 min') |> stamp("2012-12-31 12:30:45")() |> as_datetime()
+)
+```
+```{r}
+combined_df <- all_df |>
+  map(\(x)
+    left_join(time_index, x, by = "timestamp") |>
+    arrange(timestamp) |>
+    mutate(
+      household_id = replace_na(household_id, first(household_id)),
+      hour = hour(timestamp),
+      day = yday(timestamp),
+      weekday = wday(timestamp, label = TRUE, week_start = 1),
+      weekend = as.integer(weekday) %in% c(6,7),
+      season = sin((day-yday(as_date("2019-06-21")))*(2*pi/365)),
+      time = format(timestamp, "h%Hm%M"),
+    )
+  ) |> bind_rows()
+```
+
+```{r}
+smoothed_combined_df <- combined_df |>
+  group_by(household_id) |>
+  arrange(timestamp, .by_group = TRUE) |>
+  mutate(
+    power_sum_day = slide_index_dbl(power, timestamp, ~sum(.x, na.rm = TRUE), .before = hours(2), .after = hours(2)),
+    power_count_day = slide_index_dbl(power, timestamp, ~length(na.omit(.x)), .before = hours(2), .after = hours(2)),
+    smoothed_power_by_day = if_else(power_count_day == 0, NA, power_sum_day/power_count_day)
+  ) |>
+  ungroup() |>
+  group_by(household_id, weekday, time) |>
+  arrange(timestamp, .by_group = TRUE) |>
+  mutate(
+    power_sum_week = slide_index_dbl(power, timestamp, ~sum(.x, na.rm = TRUE), .before = weeks(2), .after = weeks(2)),
+    power_count_week = slide_index_dbl(power, timestamp, ~length(na.omit(.x)), .before = weeks(2), .after = weeks(2)),
+    smoothed_power_with_week = case_when(
+      power_count_day == 0 & power_count_week != 0 ~ power_sum_week/power_count_week,
+      power_count_day == 0 & power_count_week == 0 ~ NA,
+      TRUE ~ (power_sum_week + power_sum_day - power)/(power_count_day + power_count_week - 1)
+    )
+  ) |>
+  ungroup()
+```
+
+```{r}
+ggplotly(smoothed_combined_df |>
+  filter(household_id == "SFH37") |>
+  pivot_longer(cols = c('power', 'smoothed_power_with_week', 'smoothed_power_by_day'), names_to = 'label', values_to = 'power_value') |>
+  ggplot(aes(timestamp, power_value)) +geom_line(aes(colour = label)))
+```
+
+```{r}
+wide_power_by_day <- smoothed_combined_df |>
+  select(household_id, day, weekday, weekend, season, time, smoothed_power_by_day) |>
+  mutate(
+    day = factor(day),
+    household_id = factor(household_id, ordered = FALSE),
+    weekday = factor(weekday, ordered = FALSE),
+    weekend = factor(weekend, ordered = FALSE)
+  ) |>
+  pivot_wider(names_from = time, values_from = smoothed_power_by_day)
+
+wide_power_by_day_with_week <- smoothed_combined_df |>
+  select(household_id, day, weekday, weekend, season, time, smoothed_power_with_week) |>
+  mutate(
+    day = factor(day),
+    household_id = factor(household_id, ordered = FALSE),
+    weekday = factor(weekday, ordered = FALSE),
+    weekend = factor(weekend, ordered = FALSE)
+  ) |>
+  pivot_wider(names_from = time, values_from = smoothed_power_with_week)
+```
+
+```{r}
+selected_household_ids <- sample(unique(wide_power_by_day$household_id), 30)
+wide_day_selected_households <- wide_power_by_day %>% filter(household_id %in% selected_household_ids)
+```
+
+```{r}
+simple_formula <- as.formula(paste0('cbind(', paste(colnames(wide_day_selected_households)[-(1:5)], collapse = ", "), ') ~ household_id + weekday + season'))
+simple_model <- lm(
+  simple_formula,
+  wide_day_selected_households
+)
+Manova(simple_model)
+```
+
+```{r}
+interactiv_formula <- as.formula(paste0('cbind(', paste(colnames(wide_day_selected_households)[-(1:5)], collapse = ", "), ') ~ household_id * weekday * season'))
+interactiv_model <- lm(
+  interactiv_formula,
+  wide_day_selected_households
+)
+Manova(interactiv_model)
+```
+```{r}
+extractAIC(simple_model)
+```
+
+```{r}
+extractAIC(interactiv_model)
+```
+
+```{r}
+Manova(lm(
+  as.formula(paste0('cbind(', paste(colnames(wide_day_selected_households)[-(1:5)], collapse = ", "), ') ~ household_id * weekend * season')),
+  wide_day_selected_households
+))
+```
+```{r}
+extractAIC(lm(
+  as.formula(paste0('cbind(', paste(colnames(wide_day_selected_households)[-(1:5)], collapse = ", "), ') ~ household_id * weekend * season')),
+  wide_day_selected_households
+))
+```
+
+```{r eval=FALSE, include=FALSE}
+simple_model_coefficients <- rownames_to_column(as.data.frame(simple_model$coefficients), var="covariate") |> tibble()
+interactive_model_coefficients <- rownames_to_column(as.data.frame(interactiv_model$coefficients), var="covariate") |> tibble()
+```
+
+```{r eval=FALSE, include=FALSE}
+simple_model_residuals <- rownames_to_column(as.data.frame(simple_model$residuals)) |> as.tibble()
+simple_model_fitted <- rownames_to_column(as.data.frame(simple_model$fitted.values)) |> as.tibble()
+interactiv_model_residuals <- rownames_to_column(as.data.frame(interactiv_model$residuals)) |> as.tibble()
+interactiv_model_fitted <- rownames_to_column(as.data.frame(interactiv_model$fitted.values)) |> as.tibble()
+```
+
+```{r eval=FALSE, include=FALSE}
+ggplotly(ggplot(data.frame(fitted = simple_model_fitted$h6m30, residuals = simple_model_residuals$h6m30), aes(fitted, residuals)) + geom_point() + geom_hline(yintercept = 0))
+```
+```{r}
+models_per_household <- wide_power_by_day %>%
+  group_by(household_id) %>%
+  group_map(\(df, group) {
+    simple_formula <- as.formula(paste0('cbind(', paste(colnames(df)[-(1:4)], collapse = ", "), ') ~ weekday + season'))
+    simple_model <- lm(simple_formula, df)
+    interactiv_formula <- as.formula(paste0('cbind(', paste(colnames(df)[-(1:4)], collapse = ", "), ') ~ weekday * season'))
+    interactiv_model <- lm(interactiv_formula, df)
+    weekend_formula <- as.formula(paste0('cbind(', paste(colnames(df)[-(1:4)], collapse = ", "), ') ~ weekend * season'))
+    weekend_model <- lm(weekend_formula, df)
+    list(
+      'household_id' = group$household_id,
+      'simple_model' = simple_model,
+      'interactiv_model' = interactiv_model,
+      'weekend_model' = weekend_model
+    )
+  })
+```
+
+```{r eval=FALSE, include=FALSE}
+models_per_household %>% 
+  map(\(x) {
+    list(
+      'household' = x$household_id,
+      'aic_simple' = extractAIC(x$simple_model),
+      'aic_interactiv' = extractAIC(x$interactiv_model),
+      'aic_weekend' = extractAIC(x$weekend_model)
+    )
+  })
+```
+
+```{r}
+aic_by_household <- models_per_household %>%
+  map(\(item) {
+    simple_model = extractAIC(item$simple_model)
+    interactiv_model = extractAIC(item$interactiv_model)
+    list(
+      'household_id' = item$household_id,
+      'simple_model' = simple_model,
+      'interactiv_model' = interactiv_model,
+      'better' = if_else(simple_model[2] > interactiv_model[2], 'interactiv', 'simple')
+    )
+  })
+```
+
+```{r eval=FALSE, include=FALSE}
+aic_by_household
+```
+
+```{r}
+weekday_season_coefficients_by_household <-
+  wide_day_selected_households %>%
+  group_by(household_id) %>%
+  group_map(\(df, group_id) {
+    simple_formula <- as.formula(paste0('cbind(', paste(colnames(df)[-(1:4)], collapse = ", "), ') ~ weekend * season'))
+    simple_model <- lm(simple_formula, df)
+    coefficients <- rownames_to_column(
+      as.data.frame(simple_model$coefficients),
+      var = "covariate"
+    ) %>%
+      tibble() %>%
+      pivot_wider(names_from = covariate, values_from = colnames(.)[-1]) %>%
+      mutate(household = group_id$household_id)
+  }) %>%
+  bind_rows()
+```
+
+
+```{r eval=FALSE, include=FALSE}
+season_coefficients_by_household <-
+  unique(wide_power_by_day$household_id) %>%
+  map(\(id) {
+    df <- wide_power_by_day |> dplyr::filter(household_id==id)
+    simple_formula <- as.formula(paste0('cbind(', paste(colnames(df)[-(1:5)], collapse = ", "), ') ~ weekend + season'))
+    simple_model <- lm(simple_formula, df)
+    coefficients <- rownames_to_column(
+      as.data.frame(simple_model$coefficients),
+      var = "covariate"
+    ) %>%
+      tibble() %>%
+      pivot_wider(names_from = covariate, values_from = colnames(.)[-1])
+  }) %>%
+  bind_rows()
+```
+
+```{r}
+weekday_season_coef_selected_households <- weekday_season_coefficients_by_household %>%
+  filter(household %in% selected_household_ids)
+
+fviz_nbclust(
+  weekday_season_coef_selected_households %>%
+    select(-household), 
+  FUNcluster = kmeans, 
+  method = 'silhouette'
+)
+```
+
+```{r}
+kmeans_by_house <- kmeans(
+  weekday_season_coef_selected_households %>%
+    select(-household),
+  2
+)
+kmeans_by_house_mapping <- weekday_season_coef_selected_households %>%
+  mutate(cluster = as.factor(kmeans_by_house$cluster))
+
+fviz_cluster(
+  kmeans_by_house,
+  data = weekday_season_coef_selected_households %>%
+    select(-household)
+)
+```
+
+```{r}
+weekday_season_coefficients_by_household_and_weekday <-
+  wide_power_by_day %>%
+  group_by(household_id, weekday) %>%
+  group_map(\(df, group_id) {
+    simple_formula <- as.formula(paste0('cbind(', paste(colnames(df)[-(1:5)], collapse = ", "), ') ~ season'))
+    simple_model <- lm(simple_formula, df)
+    coefficients <- rownames_to_column(
+      as.data.frame(simple_model$coefficients),
+      var = "covariate"
+    ) %>%
+      tibble() %>%
+      pivot_wider(names_from = covariate, values_from = colnames(.)[-1]) %>%
+      mutate(household = group_id$household_id, weekday = group_id$weekday)
+  }) %>%
+  bind_rows()
+```
+
+```{r}
+weekday_season_coef_by_house_weekday_selected <- weekday_season_coefficients_by_household_and_weekday %>%
+  filter(household %in% selected_household_ids)
+
+fviz_nbclust(
+  weekday_season_coef_by_house_weekday_selected %>%
+    select(-household, -weekday), 
+  FUNcluster = kmeans, 
+  method = 'silhouette'
+)
+```
+
+```{r}
+kmeans_by_house_and_weekday <- kmeans(
+  weekday_season_coef_by_house_weekday_selected %>%
+    select(-c(household, weekday)),
+  2
+)
+kmeans_by_house_and_weekday_mapping <- weekday_season_coef_by_house_weekday_selected %>%
+  mutate(cluster = as.factor(kmeans_by_house_and_weekday$cluster))
+```
+
+```{r}
+interactiv_formula <- as.formula(paste0('cbind(', paste(colnames(wide_day_selected_households)[-(1:5)], collapse = ", "), ') ~ household_id * weekend * season'))
+interactiv_model <- lm(
+  interactiv_formula,
+  wide_day_selected_households
+)
+Manova(interactiv_model)
+```
+
+
+# Models for every 15 minutes per household
+
+```{r}
+models_per_quarter_per_household <- smoothed_combined_df %>%
+  group_by(household_id, time) %>%
+  arrange(time, .by_group = TRUE) %>%
+  group_map(\(df, group) {
+    formula <- as.formula('smoothed_power_by_day ~ weekend * season')
+    model <- lm(formula, df)
+    list(
+      'household_id' = group$household_id,
+      'time' = group$time,
+      'model' = model
+    )
+  })
+```
+
+```{r}
+create_coefficient_matrix_per_household <- function(acc, nxt) {
+  model_coefficients <- coefficients(nxt$model)
+  household_id <- nxt$household_id
+  if(is.null(acc[[household_id]])){
+    acc[[household_id]] <- as_tibble(as.list(model_coefficients)) %>%
+      mutate(time=nxt$time, household_id=household_id)
+  } else {
+    acc[[household_id]] <- bind_rows(
+      acc[[household_id]],
+      as_tibble(as.list(model_coefficients)) %>% mutate(time=nxt$time, household_id=household_id)
+    )
+  }
+  acc
+}
+
+coefficients_per_quarter_per_household <- models_per_quarter_per_household %>%
+  reduce(\(x, y) create_coefficient_matrix_per_household(x, y), .init = list())
+```
+
+```{r}
+kmeans_coefficients <- coefficients_per_quarter_per_household %>%
+  map(\(x) {
+    pivot_wider(data = x, names_from = 'time', values_from = colnames(x)[-(5:6)])
+  }) %>%
+  bind_rows()
+```
+
+```{r}
+kmeans_coef_selected_households <- kmeans_coefficients %>%
+    filter(household_id %in% selected_household_ids)
+
+fviz_nbclust(
+  kmeans_coef_selected_households %>%
+    select(-household_id), 
+  FUNcluster = kmeans, 
+  method = 'silhouette'
+)
+```
+```{r}
+kmeans_per_household_per_quarter <- kmeans(
+  kmeans_coef_selected_households %>%
+    select(-household_id),
+  2
+)
+kmeans_per_household_per_quarter_mapping<- kmeans_coef_selected_households %>%
+  mutate(cluster = as.factor(kmeans_per_household_per_quarter$cluster))
+
+fviz_cluster(
+  kmeans_per_household_per_quarter,
+  data = kmeans_coef_selected_households %>%
+    select(-household_id)
+)
+```
+```{r}
+# Function to calculate squared Euclidean distance
+squared_euclidean_distance <- function(pointA, pointB) {
+  sum((pointA - pointB)^2)
+}
+
+# Map row to a cluster based on minimum Euclidean distance
+cluster_map <- function(row, centers) {
+  cluster_count <- nrow(centers)
+  point <- as.numeric(row)
+  distances_sq <- map_dbl(1:cluster_count, ~ squared_euclidean_distance(point, centers[.x, ]))
+  which.min(distances_sq)
+}
+
+kmeans_coef_not_selected_households <- kmeans_coefficients %>%
+  filter(!(household_id %in% selected_household_ids))
+
+remaining_household_assignments <- kmeans_coef_not_selected_households  %>%
+  rowwise() %>%
+  mutate(
+    cluster = as.factor(cluster_map(across(-household_id), kmeans_per_household_per_quarter$centers))
+  ) %>%
+  ungroup()
+```
+
+```{r include=FALSE, eval=FALSE}
+cluster_avg <- function(current_row , mapping) {
+  household_id <- current_row$household_id
+  cluster_number <- current_row$cluster
+  mapping %>%
+      filter(as.integer(cluster) == as.integer(cluster_number)) %>%
+      summarise(across(-c(household_id, cluster), \(x) mean(x, na.rm = TRUE)))
+}
+
+wide_load_profile <- remaining_household_assignments %>%
+  select(c(household_id, cluster)) %>%
+  rowwise() %>%
+  mutate(cluster_avg(across(everything()), kmeans_per_household_per_quarter_mapping)) %>%
+  ungroup()
+```
+
+```{r include=FALSE, eval=FALSE}
+long_load_profile <- wide_load_profile %>%
+    pivot_longer(
+        cols = -c(household_id, cluster),
+        names_to = c(".value", "time"),
+        names_pattern = "^(.*)_(.*)$"
+    )
+```
+
+```{r include=FALSE, eval=FALSE}
+get_beta_matrix <- function(load_profile, selected_household_id) {
+  household_coef <- load_profile %>%
+    filter(household_id == selected_household_id) %>%
+    select(-c(household_id, cluster))
+  matrix_form <- t(as.matrix(household_coef))
+  colnames(matrix_form) <- matrix_form["time", ]
+  matrix_form_by_time <- matrix_form[-1, , drop = FALSE]
+  matrix_form_by_time_as_numeric <- apply(matrix_form_by_time, 2, as.numeric)
+  rownames(matrix_form_by_time_as_numeric) <- rownames(matrix_form_by_time)
+  matrix_form_by_time_as_numeric
+}
+
+get_beta_matrix(long_load_profile, "SFH17")
+```
+
+```{r include=FALSE, eval=FALSE}
+get_x_matrix <- function(...) {
+  date_value_list <- list(...) %>% map(as_date)
+  x_matrix <- date_value_list %>%
+    reduce(\(acc, nxt) {
+      day_value <- yday(nxt)
+      weekend <- wday(nxt) %in% c(6,7)
+      season <- sin((day_value-yday(as_date("2019-06-21")))*(2*pi/365))
+      rbind(acc, c(1, weekend, season, weekend * season))
+    }, .init = matrix(ncol = 4, nrow = 0))
+  x_matrix
+}
+```
+
+```{r include=FALSE, eval=FALSE}
+get_x_matrix("2019-02-01", "2019-02-02", "2019-02-03") %*% get_beta_matrix(long_load_profile, "SFH17")
+```
+
+```{r}
+models_per_quarter_per_household_predictions <- models_per_quarter_per_household %>%
+  map(\(household_time_model) {
+    tibble(
+      date = seq(as_date("2019-01-01"), as_date("2019-12-31"), by='1 day')
+    ) %>%
+      mutate(
+        household_id = household_time_model$household_id,
+        time = household_time_model$time,
+        weekend = wday(date) %in% c(6,7),
+        season = sin((yday(date)-yday(as_date("2019-06-21")))*(2*pi/365)),
+        y_hat = predict(household_time_model$model, across(c(weekend, season)))
+      )
+  }) %>%
+  bind_rows() %>%
+  arrange(household_id, date, time)
+```
+
+```{r}
+smoothed_combined_df_with_date <- smoothed_combined_df %>% mutate(date = as_date(timestamp))
+
+models_per_quarter_per_household_predictions <- models_per_quarter_per_household_predictions %>%
+  inner_join(smoothed_combined_df_with_date, by = join_by(household_id, date, time)) %>%
+  select(household_id, timestamp, date, time, y_hat, smoothed_power_by_day) %>%
+  mutate(residuals = smoothed_power_by_day - y_hat)
+```
+
+```{r}
+models_per_quarter_per_household_predictions <- models_per_quarter_per_household_predictions %>%
+  inner_join(
+    bind_rows(kmeans_per_household_per_quarter_mapping, remaining_household_assignments),
+    by = join_by(household_id)
+  ) %>%
+  select(household_id, timestamp, date, time, y_hat, smoothed_power_by_day, residuals, cluster)
+```
+
+```{r}
+cluster_prections_residuals <- models_per_quarter_per_household_predictions %>%
+  group_by(cluster, date, time) %>%
+  summarise(
+    timestamp = first(timestamp),
+    y_hat_bar = mean(y_hat, na.rm = TRUE),
+    mean_prediction_error = sqrt(mean(residuals^2, na.rm =TRUE))
+  ) %>% ungroup()
+```
+```{r}
+ggplotly(cluster_prections_residuals %>%
+  filter(complete.cases(.)) %>%
+  filter(date %in% c(as_date("2019-02-02"), as_date("2019-02-03"))) %>%
+  ggplot(aes(x = timestamp, y = y_hat_bar)) +
+    geom_ribbon(
+      aes(ymin = y_hat_bar - mean_prediction_error, ymax = y_hat_bar + mean_prediction_error),
+      fill = 'lightblue',
+      alpha = 0.5
+    ) +
+    geom_line(color = 'steelblue', size = 1) + facet_wrap(~ cluster, nrow = 2))
+```
+
