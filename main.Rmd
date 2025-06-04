@@ -176,6 +176,7 @@ interactiv_model_fitted <- rownames_to_column(as.data.frame(interactiv_model$fit
 ```{r eval=FALSE, include=FALSE}
 ggplotly(ggplot(data.frame(fitted = simple_model_fitted$h6m30, residuals = simple_model_residuals$h6m30), aes(fitted, residuals)) + geom_point() + geom_hline(yintercept = 0))
 ```
+
 ```{r}
 models_per_household <- wide_power_by_day %>%
   group_by(household_id) %>%
@@ -225,7 +226,7 @@ aic_by_household <- models_per_household %>%
 aic_by_household
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 weekday_season_coefficients_by_household <-
   wide_day_selected_households %>%
   group_by(household_id) %>%
@@ -261,7 +262,7 @@ season_coefficients_by_household <-
   bind_rows()
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 weekday_season_coef_selected_households <- weekday_season_coefficients_by_household %>%
   filter(household %in% selected_household_ids)
 
@@ -273,7 +274,7 @@ fviz_nbclust(
 )
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 kmeans_by_house <- kmeans(
   weekday_season_coef_selected_households %>%
     select(-household),
@@ -289,7 +290,7 @@ fviz_cluster(
 )
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 weekday_season_coefficients_by_household_and_weekday <-
   wide_power_by_day %>%
   group_by(household_id, weekday) %>%
@@ -307,7 +308,7 @@ weekday_season_coefficients_by_household_and_weekday <-
   bind_rows()
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 weekday_season_coef_by_house_weekday_selected <- weekday_season_coefficients_by_household_and_weekday %>%
   filter(household %in% selected_household_ids)
 
@@ -319,7 +320,7 @@ fviz_nbclust(
 )
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 kmeans_by_house_and_weekday <- kmeans(
   weekday_season_coef_by_house_weekday_selected %>%
     select(-c(household, weekday)),
@@ -509,6 +510,7 @@ models_per_quarter_per_household_predictions <- models_per_quarter_per_household
       )
   }) %>%
   bind_rows() %>%
+  filter(household_id %in% selected_household_ids) %>%
   arrange(household_id, date, time)
 ```
 
@@ -524,7 +526,7 @@ models_per_quarter_per_household_predictions <- models_per_quarter_per_household
 ```{r}
 models_per_quarter_per_household_predictions <- models_per_quarter_per_household_predictions %>%
   inner_join(
-    bind_rows(kmeans_per_household_per_quarter_mapping, remaining_household_assignments),
+    kmeans_per_household_per_quarter_mapping,
     by = join_by(household_id)
   ) %>%
   select(household_id, timestamp, date, time, y_hat, smoothed_power_by_day, residuals, cluster)
