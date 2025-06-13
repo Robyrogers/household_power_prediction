@@ -580,7 +580,8 @@ get_x_matrix("2019-02-01", "2019-02-02", "2019-02-03") %*% get_beta_matrix(long_
 ```
 
 ```{r}
-models_per_quarter_per_household_predictions <- models_per_quarter_per_household %>%
+per_cluster_day_time_power_estimate <- models_per_quarter_per_household %>%
+  keep(\(x) x$household_id %in% selected_household_ids) %>%
   map(\(household_time_model) {
     tibble(
       date = seq(as_date("2019-01-01"), as_date("2019-12-31"), by='1 day')
@@ -594,20 +595,52 @@ models_per_quarter_per_household_predictions <- models_per_quarter_per_household
       )
   }) %>%
   bind_rows() %>%
-  filter(household_id %in% selected_household_ids) %>%
-  arrange(household_id, date, time)
+  arrange(household_id, date, time) %>%
+  inner_join(
+    kmeans_per_household_per_quarter_mapping,
+    by = join_by(household_id)
+  ) %>%
+  group_by(cluster, date, time) %>%
+  summarise(
+    cluster = first(cluster),
+    date = first(date),
+    time = first(time),
+    y_dk_hat = mean(y_hat)
+  )
 ```
 
 ```{r}
 smoothed_combined_df_with_date <- smoothed_combined_df %>% mutate(date = as_date(timestamp))
 
+per_cluster_day_time_sigma_hat <- smoothed_combined_df_with_date %>%
+  filter(household_id %in% selected_household_ids) %>%
+  inner_join(
+      kmeans_per_household_per_quarter_mapping,
+      by = join_by(household_id)
+  ) %>%
+  inner_join(
+      per_cluster_day_time_power_estimate,
+      by = join_by(cluster, date, time)
+  ) %>%
+  select(cluster, household_id, timestamp, date, time, power, smoothed_power_by_day, smoothed_power_with_week, y_dk_hat) %>%
+  group_by(cluster, timestamp, date, time) %>%
+  summarise(
+    cluster = first(cluster),
+    timestamp = first(timestamp),
+    date = first(date),
+    time = first(time),
+    y_dk_hat = first(y_dk_hat),
+    sigma_hat = sqrt(mean((y_dk_hat - power)^2, na.rm = TRUE))
+  ) %>%
+  arrange(cluster, date)
+```
+
+```{r eval=FALSE, include=FALSE}
 models_per_quarter_per_household_predictions <- models_per_quarter_per_household_predictions %>%
   inner_join(smoothed_combined_df_with_date, by = join_by(household_id, date, time)) %>%
   select(household_id, timestamp, date, time, y_hat, smoothed_power_by_day) %>%
   mutate(residuals = smoothed_power_by_day - y_hat)
-```
 
-```{r}
 models_per_quarter_per_household_predictions <- models_per_quarter_per_household_predictions %>%
   inner_join(
     kmeans_per_household_per_quarter_mapping,
@@ -616,7 +649,7 @@ models_per_quarter_per_household_predictions <- models_per_quarter_per_household
   select(household_id, timestamp, date, time, y_hat, smoothed_power_by_day, residuals, cluster)
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 cluster_prections_residuals <- models_per_quarter_per_household_predictions %>%
   group_by(cluster, date, time) %>%
   summarise(
@@ -626,15 +659,15 @@ cluster_prections_residuals <- models_per_quarter_per_household_predictions %>%
   ) %>% ungroup()
 ```
 ```{r}
-ggplotly(cluster_prections_residuals %>%
-  filter(complete.cases(.)) %>%
+per_cluster_day_time_sigma_hat %>%
+  drop_na(sigma_hat) %>%
   filter(date %in% c(as_date("2019-02-02"), as_date("2019-02-03"))) %>%
-  ggplot(aes(x = timestamp, y = y_hat_bar)) +
-    geom_ribbon(
-      aes(ymin = y_hat_bar - mean_prediction_error, ymax = y_hat_bar + mean_prediction_error),
+  ggplot(aes(x = timestamp, y = y_dk_hat)) +
+  geom_ribbon(
+      aes(ymin = y_dk_hat - sigma_hat, ymax = y_dk_hat + sigma_hat),
       fill = 'lightblue',
       alpha = 0.5
-    ) +
-    geom_line(color = 'steelblue', size = 1) + facet_wrap(~ cluster, nrow = 2))
+  ) +
+  geom_line(color = 'steelblue', size = 1) + facet_wrap(~ cluster, nrow = 2)
 ```
 
