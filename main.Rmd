@@ -91,7 +91,7 @@ smoothed_combined_df <- combined_df |>
 
 ```{r}
 ggplotly(smoothed_combined_df |>
-  filter(household_id == "SFH37") |>
+  filter(household_id == "SFH6") |>
   pivot_longer(cols = c('power', 'smoothed_power_with_week', 'smoothed_power_by_day'), names_to = 'label', values_to = 'power_value') |>
   ggplot(aes(timestamp, power_value)) +geom_line(aes(colour = label)))
 ```
@@ -140,13 +140,80 @@ interactiv_model <- lm(
 )
 Manova(interactiv_model)
 ```
+
 ```{r}
-extractAIC(simple_model)
+calculate_mlm_aic <- function(mlm_object) {
+  # Input validation: check if the object is an 'lm' object
+  if (!inherits(mlm_object, "lm")) {
+    stop("Input must be an 'lm' object (preferably of class 'mlm' for multivariate models).")
+  }
+
+  # 1. Extract response matrix (Y) and design matrix (X) from the lm object
+  # model.response extracts the original response matrix
+  Y <- model.response(model.frame(mlm_object))
+  # model.matrix extracts the design matrix used in the fit
+  X <- model.matrix(mlm_object)
+
+  # Ensure Y is a matrix, even if there's only one response variable
+  if (!is.matrix(Y)) {
+    Y <- as.matrix(Y)
+  }
+
+  n <- nrow(Y) # Number of observations
+  p <- ncol(Y) # Number of response variables
+  q <- ncol(X) # Number of predictor coefficients (including intercept if included)
+
+  # Input validation
+  if (p == 0) {
+    stop("Response must have at least one column (response variable).")
+  }
+  if (n <= q) {
+    # Degrees of freedom for residuals is n - q. Must be positive.
+    stop(paste("Number of observations (", n, ") must be greater than number of predictors (", q, ") to estimate coefficients.", sep=""))
+  }
+  if (n < p) {
+    # To reliably estimate a p x p covariance matrix, need at least p observations.
+    stop(paste("Number of observations (", n, ") must be greater than or equal to number of response variables (", p, ") to estimate a non-singular covariance matrix.", sep=""))
+  }
+
+  # 2. Extract fitted values and residuals directly from the lm object
+  # This avoids re-calculating coefficients
+  residuals <- residuals(mlm_object)
+
+  # 3. Estimate error covariance matrix (Sigma_hat) - Maximum Likelihood Estimate
+  # Sigma_hat = (1/n) * t(residuals) %*% residuals
+  Sigma_hat <- (t(residuals) %*% residuals) / n
+
+  # Check for singularity of Sigma_hat
+  det_Sigma <- det(Sigma_hat)
+  if (det_Sigma <= 1e-12) { # Check for very small or zero determinant
+    warning("Estimated covariance matrix is singular or near-singular. AIC calculation may be unreliable.")
+  }
+
+  # 4. Calculate maximized log-likelihood
+  # log(L_max) = - (n*p/2) * log(2*pi) - (n/2) * log(det(Sigma_hat)) - (n*p/2)
+  logLik_max <- - (n * p / 2) * log(2 * pi) - (n / 2) * log(det_Sigma) - (n * p / 2)
+
+  # 5. Calculate number of parameters (k)
+  # k = (number of regression coefficients) + (number of unique covariance parameters)
+  # Regression coefficients: q (predictors, including intercept) * p (response variables)
+  # Covariance parameters: p * (p + 1) / 2 (unique elements of a symmetric p x p matrix)
+  num_params <- (q * p) + (p * (p + 1) / 2)
+
+  # 6. Calculate AIC
+  aic_value <- 2 * num_params - 2 * logLik_max
+
+  return(aic_value)
+}
 ```
 
 ```{r}
-extractAIC(interactiv_model)
+calculate_mlm_aic(simple_model)
 ```
+```{r}
+calculate_mlm_aic(interactiv_model)
+```
+
 
 ```{r}
 Manova(lm(
@@ -155,7 +222,7 @@ Manova(lm(
 ))
 ```
 ```{r}
-extractAIC(lm(
+calculate_mlm_aic(lm(
   as.formula(paste0('cbind(', paste(colnames(wide_day_selected_households)[-(1:5)], collapse = ", "), ') ~ household_id * weekend * season')),
   wide_day_selected_households
 ))
@@ -177,7 +244,7 @@ interactiv_model_fitted <- rownames_to_column(as.data.frame(interactiv_model$fit
 ggplotly(ggplot(data.frame(fitted = simple_model_fitted$h6m30, residuals = simple_model_residuals$h6m30), aes(fitted, residuals)) + geom_point() + geom_hline(yintercept = 0))
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 models_per_household <- wide_power_by_day %>%
   group_by(household_id) %>%
   group_map(\(df, group) {
@@ -208,16 +275,16 @@ models_per_household %>%
   })
 ```
 
-```{r}
+```{r eval=FALSE, include=FALSE}
 aic_by_household <- models_per_household %>%
   map(\(item) {
-    simple_model = extractAIC(item$simple_model)
-    interactiv_model = extractAIC(item$interactiv_model)
+    simple_model = calculate_mlm_aic(item$simple_model)
+    interactiv_model = calculate_mlm_aic(item$interactiv_model)
     list(
       'household_id' = item$household_id,
       'simple_model' = simple_model,
       'interactiv_model' = interactiv_model,
-      'better' = if_else(simple_model[2] > interactiv_model[2], 'interactiv', 'simple')
+      'better' = if_else(simple_model > interactiv_model, 'interactiv', 'simple')
     )
   })
 ```
@@ -356,6 +423,23 @@ models_per_quarter_per_household <- smoothed_combined_df %>%
     )
   })
 ```
+
+```{r}
+manova_per_household <- wide_day_selected_households %>%
+  group_by(household_id) %>%
+  group_map(\(df, group) {
+    interactiv_formula <- as.formula(paste0('cbind(', paste(colnames(df)[-(1:4)], collapse = ", "), ') ~ weekend * season'))
+    interactiv_model <- lm(
+      interactiv_formula,
+      df
+    )
+    list(
+      'household_id' = group$household_id,
+      'manova' =  Manova(interactiv_model)
+    )
+  })
+```
+
 
 ```{r}
 create_coefficient_matrix_per_household <- function(acc, nxt) {
